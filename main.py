@@ -2,6 +2,7 @@
 import os
 from langchain import hub
 from langchain_together import ChatTogether
+from langchain_openai import ChatOpenAI
 #from langchain.prompts import ChatPromptTemplate
 from langchain.schema import StrOutputParser
 from langchain.schema.runnable import Runnable
@@ -21,11 +22,17 @@ import chainlit as cl
 
 load_dotenv()
 
+# Suppress error message
+os.environ["GRPC_VERBOSITY"] = "ERROR"
+os.environ["GLOG_minloglevel"] = "2"
+
 together_api_key = os.environ.get('TOGETHERAI_KEY')
 pinecone_api_key = os.environ.get('PINECONE_API_KEY')
 index_name = 'l10'
 source_doc = 'data/123hk.pdf'
 embeddings = HuggingFaceEmbeddings(model_name="infgrad/stella-base-zh-v2")
+
+_REBUILD_INDEX = False
 
 
 def rebuild_index(index_name: str) -> PineconeVectorStore:
@@ -41,8 +48,7 @@ def rebuild_index(index_name: str) -> PineconeVectorStore:
         ),
         deletion_protection="disabled"
     )
-    index = pc.Index(index_name)
-    vector_store = PineconeVectorStore(index=index, embedding=embeddings)
+    vector_store = PineconeVectorStore(index_name=index_name, embedding=embeddings)
     md_text = pymupdf4llm.to_markdown(source_doc)
     splitter = MarkdownTextSplitter(chunk_size=200, chunk_overlap=20)
     docs = splitter.create_documents([md_text])
@@ -52,22 +58,53 @@ def rebuild_index(index_name: str) -> PineconeVectorStore:
 # set the LANGCHAIN_API_KEY environment variable (create key in settings)
 
 
-vector_store = rebuild_index(index_name)
-retriever = vector_store.as_retriever()
+if _REBUILD_INDEX:
+    vector_store = rebuild_index(index_name)
+else:
+    # pc = Pinecone(api_key=pinecone_api_key)
+    vector_store = PineconeVectorStore(index_name=index_name, embedding=embeddings)
 
+retriever = vector_store.as_retriever(search_kwargs={"k": 5})
 
-@cl.on_chat_start
-async def on_chat_start():
-    # model = ChatOpenAI(streaming=True)
-    model = ChatTogether(
-        model="mistralai/Mixtral-8x22B-Instruct-v0.1",
-        api_key=together_api_key
+if __name__ == "__main__":
+    model = ChatOpenAI(
+        base_url="https://api.together.xyz/v1",
+        model="mistralai/Mixtral-8x7B-Instruct-v0.1",
+        api_key=together_api_key,
+        streaming=True,
     )
 
     prompt = hub.pull("rlm/rag-prompt")
 
     def format_docs(docs):
-        print(docs)
+        return "\n\n".join(doc.page_content for doc in docs)
+
+    runnable = (
+        {"context": retriever | format_docs, "question": RunnablePassthrough()}
+        | prompt
+        | model
+        | StrOutputParser()
+    )
+
+    print(retriever.invoke('What is the acqusition price?'))
+
+    print(runnable.invoke('What is the acquisition price?'))
+
+
+@cl.on_chat_start
+async def on_chat_start():
+    # model = ChatOpenAI(streaming=True)
+    model = ChatOpenAI(
+        base_url="https://api.together.xyz/v1",
+        model="mistralai/Mixtral-8x7B-Instruct-v0.1",
+        api_key=together_api_key,
+        streaming=True,
+    )
+
+    prompt = hub.pull("rlm/rag-prompt")
+
+    def format_docs(docs):
+        print(f"Number of returned docs: {len(docs)}")
         return "\n\n".join(doc.page_content for doc in docs)
 
     runnable = (
@@ -91,5 +128,4 @@ async def on_message(message: cl.Message):
         config=RunnableConfig(callbacks=[cl.LangchainCallbackHandler()]),
     ):
         await msg.stream_token(chunk)
-
     await msg.send()
