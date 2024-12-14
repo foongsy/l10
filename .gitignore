@@ -162,3 +162,5 @@ cython_debug/
 #.idea/
 chainlit.md
 .chainlit/
+data/
+.DS_Store*
